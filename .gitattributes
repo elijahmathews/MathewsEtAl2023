@@ -1,0 +1,7 @@
+data/parrot_v4_obsphot_1024n_5l_05z30.npy filter=lfs diff=lfs merge=lfs -text
+data/parrot_v4_obsphot_128n_5l_05z30.npy filter=lfs diff=lfs merge=lfs -text
+data/parrot_v4_obsphot_256n_5l_05z30.npy filter=lfs diff=lfs merge=lfs -text
+data/parrot_v4_obsphot_32n_5l_05z30.npy filter=lfs diff=lfs merge=lfs -text
+data/parrot_v4_obsphot_512n_5l_05z30.npy filter=lfs diff=lfs merge=lfs -text
+data/parrot_v4_obsphot_512n_5l_24s_00z24.npy filter=lfs diff=lfs merge=lfs -text
+data/parrot_v4_obsphot_64n_5l_05z30.npy filter=lfs diff=lfs merge=lfs -text
