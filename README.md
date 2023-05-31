@@ -1,6 +1,6 @@
 # Mathews et al. (2023)
 
-This repository contains code and data relevant to the Mathews et al. (2023) article published in the Astrophysical Journal.
+This repository contains code and data relevant to the Mathews et al. (2023) article submitted to the Astrophysical Journal.
 
 The `/data` directory contains the emulator used in the paper in addition and documentation for reading the emulator file. In addition, the `/src` directory contains code that allows one to run [Prospector](https://github.com/bd-j/prospector) fits using the emulator in place of [FSPS](https://github.com/cconroy20/fsps). Finally, the `/notebooks` directory contains a notebook demonstrating a sample fit to a mock galaxy using the emulator and Prospector.
 
