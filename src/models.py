@@ -10,7 +10,7 @@ from astropy.cosmology import WMAP9
 from scipy.special import erf, erfinv
 
 #
-# EMULATOR
+# SINGLE EMULATOR
 #
 class JAXGELUEmulator(ProspectorParams):
     def __init__(self, model_params, fp=None, obs=None, param_order=None):
@@ -21,14 +21,29 @@ class JAXGELUEmulator(ProspectorParams):
         # This redir dictionary is from Julia, which is 1-indexed. Hence the -1 here.
         self.sorter = [redir[f.name]-1 for f in obs['filters']]
         
-        # If zred is not a free parameter, we'll need to know to add it before calling
-        # the emulator. This should probably be modified for situations where *any* of
-        # the 18 emulated parameters aren't free.
-        if not model_params["zred"]["isfree"]:
-            self.zred_in_theta = False
-        else:
-            self.zred_in_theta = True
-        self.zred_index = 14
+        # Store the redshift, so that it can be used to determine which
+        # emulator to run
+        self.zred_index = 14 
+
+        # list of emulator parameters, in order
+        self.plist = ['massmet_1',
+                      'massmet_2',
+                     'logsfr_ratios_1',
+                     'logsfr_ratios_2',
+                     'logsfr_ratios_3',
+                     'logsfr_ratios_4',
+                     'logsfr_ratios_5',
+                     'logsfr_ratios_6',
+                     'dust2',
+                     'dust_index',
+                     'dust1_fraction',
+                     'log_fagn',
+                     'log_agn_tau',
+                     'gas_logz',
+                     'zred',
+                     'duste_qpah',
+                     'duste_umin',
+                     'log_duste_gamma']
 
         # TODO: Check if prior bounds are with emulbounds.
         self.emulbounds = emulbounds
@@ -74,10 +89,13 @@ class JAXGELUEmulator(ProspectorParams):
 
     # Add zred to theta if zred is fixed
     def modify_theta(self, theta):
-        if self.zred_in_theta:
-            return theta
-        else:
-            return np.insert(theta, self.zred_index, self.config_dict["zred"]["init"])
+
+        for i, lab in enumerate(self.plist):
+            if (lab not in self.theta_labels()): 
+                theta = jax.numpy.insert(theta, i, self.params[lab][0])
+
+        return theta
+
     
     @partial(jax.jit, static_argnums=(0,))
     def nonlinear_layers(self, norm_theta):
@@ -255,6 +273,351 @@ def build_model_emulator(obs=None, emulfp=None, **extras):
     fit_order = fit_order + list(extra)
 
     return JAXGELUEmulator(
+        model_params,
+        fp = emulfp,
+        obs = obs,
+        param_order = fit_order
+    )
+
+
+
+#
+# STITCHED EMULATOR
+#
+class PhotoMultiEmulator(ProspectorParams):
+
+    def __init__(self, model_params, fp=None, obs=None, param_order=None):
+        super(PhotoMultiEmulator, self).__init__(model_params, param_order=param_order)
+
+        # Load all emulator data.
+        self.dat = np.load(fp, allow_pickle=True).all()
+
+        # Determine the indices of the filters in obs['filters']
+        self.sorter = np.array([self.dat["filter_redir"][f.name] for f in obs["filters"]], dtype=int)
+
+        # TODO: Check if prior bounds are with emulbounds.
+        # This will require messing with the massmet prior (which uses prior.bounds()) to
+        # bring it in line with the other priors (which use prior.a and prior.b)
+
+        # Store the redshift, so that it can be used to determine which
+        # emulator to run
+        self.zred_index = self.dat["zred_index"]
+
+        # list of emulator parameters, in order
+        self.plist = ['massmet_1',
+                      'massmet_2',
+                     'logsfr_ratios_1',
+                     'logsfr_ratios_2',
+                     'logsfr_ratios_3',
+                     'logsfr_ratios_4',
+                     'logsfr_ratios_5',
+                     'logsfr_ratios_6',
+                     'dust2',
+                     'dust_index',
+                     'dust1_fraction',
+                     'log_fagn',
+                     'log_agn_tau',
+                     'gas_logz',
+                     'zred',
+                     'duste_qpah',
+                     'duste_umin',
+                     'log_duste_gamma']
+
+        # Get the redshift limits of each sub-emulator and store them.
+        self.emul_lims = self.dat["emulator_limits"]
+
+        # Convert ANN things to JAX arrays.
+        self.nets = self.dat["nets"]
+        for (i, net) in enumerate(self.nets):
+            # Unpack this sub-network
+            norm, denorm, wght, bias, act = net
+
+            # Translate things into JAX and remove irrelevant filters
+            norm = [jax.numpy.array(n) for n in norm]
+            denorm = [jax.numpy.array(d[self.sorter]) for d in denorm]
+            wght = [jax.numpy.array(W) for W in wght]
+            bias = [jax.numpy.array(b) for b in bias]
+            wght[-1] = wght[-1][self.sorter, :]
+            bias[-1] = bias[-1][self.sorter]
+
+            # Repack
+            self.nets[i] = (norm, denorm, wght, bias)
+
+    # Add any missing parameters
+    @partial(jax.jit, static_argnums=0)
+    def modify_theta(self, theta):
+
+        for i, lab in enumerate(self.plist):
+            if (lab not in self.theta_labels()): 
+                theta = jax.numpy.insert(theta, i, self.params[lab][0])
+
+        return theta
+
+
+    # Determine the relevant angle needed for the sin and cos functions in
+    # transition_coef. z0 is the center of an sub-network overlap and deltaz
+    # is the full width of the overlap.
+    @partial(jax.jit, static_argnums=0)
+    def transition_theta(self, z, z0, deltaz):
+        return (jax.numpy.pi / (2 * deltaz)) * (z - z0 + 0.5*deltaz)
+
+    @partial(jax.jit, static_argnums=0)
+    def transition_sin2(self, z, z0l, deltazl):
+        return jax.numpy.sin(self.transition_theta(z, z0l, deltazl))**2
+
+    @partial(jax.jit, static_argnums=0)
+    def transition_cos2(self, z, z0r, deltazr):
+        return jax.numpy.cos(self.transition_theta(z, z0r, deltazr))**2
+
+    def outside_range(self, z, z0l, deltazl, z0r, deltazr):
+        return (z <= (z0l - 0.5*deltazl)) | (z >= (z0r + 0.5*deltazr))
+
+    def exclusive_range(self, z, z0l, deltazl, z0r, deltazr):
+        return (z >= (z0l + 0.5*deltazl)) & (z <= (z0r - 0.5*deltazr))
+
+    def left_transition(self, z, z0l, deltazl, z0r, deltazr):
+        return (z > (z0l - 0.5*deltazl)) & (z < (z0l + 0.5*deltazl))
+
+    # Compute how much each sub-network should contribute to the overall
+    # prediction. Equal to 1 where the sub-network is the only one trained,
+    # 0 where the sub-emulator is not trained, and between 0 and 1 in overlaps.
+    def transition_coef(self, z, z0l, deltazl, z0r, deltazr):
+        if self.outside_range(z, z0l, deltazl, z0r, deltazr):
+            return 0.0
+        elif self.exclusive_range(z, z0l, deltazl, z0r, deltazr):
+            return 1.0
+        elif self.left_transition(z, z0l, deltazl, z0r, deltazr):
+            return self.transition_sin2(z, z0l, deltazl)
+        else:
+            return self.transition_cos2(z, z0r, deltazr)
+
+    @partial(jax.jit, static_argnums=0)
+    def transition_coef2(self, z, z0l, deltazl, z0r, deltazr):
+        return jax.numpy.piecewise(
+            z,
+            [
+                (z <= (z0l - 0.5*deltazl)) | (z >= (z0r + 0.5*deltazr)),
+                (z >= (z0l + 0.5*deltazl)) & (z <= (z0r - 0.5*deltazr)),
+                (z > (z0l - 0.5*deltazl)) & (z < (z0l + 0.5*deltazl)),
+                (z > (z0r - 0.5*deltazr)) & (z < (z0r + 0.5*deltazr)),
+            ],
+            [
+                0.0,
+                1.0,
+                self.transition_sin2(z, z0l, deltazl),
+                self.transition_cos2(z, z0r, deltazr),
+            ],
+        )
+
+    @partial(jax.jit, static_argnums=0)
+    def forward_dot(self, wght, bias, vec_in):
+        return jax.nn.gelu(jax.numpy.dot(wght, vec_in) + bias)
+    
+    # Run a forward pass through a sub-network.
+    @partial(jax.jit, static_argnums=0)
+    def forward_pass(self, in_vec, net):
+        # Grab NN stuff
+        norm, denorm, wght, bias = net
+
+        # Normalize layer
+        result = (in_vec - norm[0]) / norm[1]
+
+        # Nonlinear layers
+        for i in range(len(wght) - 1):
+            result = self.forward_dot(wght[i], bias[i], result)
+
+        # Linear layer.
+        result = jax.numpy.dot(wght[-1], result) + bias[-1]
+
+        # Denormalize layer.
+        result = (denorm[1] * result) + denorm[0]
+
+        return result
+
+    # Convert AB magnitudes to maggies.
+    #
+    # Note: The emulator actually outputs arsinh magnitudes, but here we
+    # are assuming that these arsinh mags are exactly equal to their
+    # logarithmic AB counterparts. This is a very safe assumption for AB
+    # magnitudes brighter than about +33 (they asymptotically become equal
+    # as the AB magnitude gets brighter), but becomes very poor fainter than
+    # +34.
+    @partial(jax.jit, static_argnums=0)
+    def demagify(self, mag):
+        result = jax.numpy.multiply(mag, -0.4)
+        result = jax.numpy.divide(result, jax.numpy.log10(jax.numpy.e))
+        result = jax.numpy.exp(result)
+
+        return result
+
+    @partial(jax.jit, static_argnums=0)
+    def initial_phot_arr(self):
+        return jax.numpy.zeros(len(self.sorter))
+
+    # Use the full emulator suite to predict a set of photometry for a given input
+    # theta_in parameter vector.
+    @partial(jax.jit, static_argnums=0)
+    def predict_phot(self, theta_in, **extras):
+        # Add redshift to theta if needed.
+        theta = self.modify_theta(theta_in)
+
+        # Grab the redshift from theta.
+        z = theta[self.zred_index]
+
+        # Compute the coefficients to multiply each emulator by.
+        coefs = [self.transition_coef2(z, *emul_lim) for emul_lim in self.emul_lims]
+
+        # Initialize an array for the photometry prediction.
+        result = self.initial_phot_arr()
+
+        # Loop through the subemulators. Only evaluate the ones that have
+        # a nonzero coefficient. Add each subemulator's result to the overall
+        # result (since coefs sum to 1).
+        for (i, coef) in enumerate(coefs):
+            result += coef * jax.lax.cond(
+                coef == 0.0,
+                lambda u, q: self.initial_phot_arr(),
+                self.forward_pass,
+                theta,
+                self.nets[i],
+            )
+
+        # Convert the emulator's output to maggies (see comments on self.demagify)
+        predict_lin = self.demagify(result)
+
+        # Return linear result.
+        return predict_lin
+
+    # We don't predict spectra, both because we don't have an emulator available
+    # and because it would take too long anyway. Thus, let's just generate a vector
+    # of zeros and return that in case Prospector complains about not having a
+    # spectrum predicted.
+    @partial(jax.jit, static_argnums=0)
+    def predict_spec(self, theta, **extras):
+        return jax.numpy.zeros(5994)
+
+    # Same thing with mfrac, although we *do* have an emulator for this.
+    @partial(jax.jit, static_argnums=0)
+    def predict_mfrac(self, theta, **extras):
+        return jax.numpy.zeros(1)
+
+    # General predict function, returns useless mfrac and spec right now.
+    # 
+    # Convert to numpy.array vectors to mitigate the indexing slowdown that
+    # comes from prospect/likelihood/likelihood.py lines 121 and 122 as of
+    # commit 9cfb4a4ef3350c90d6729c3400b340779570bd82. Remove the np.array
+    # calls here (to export the jax.DeviceArray vectors) and run the following
+    # benchmark to see what I mean:
+    # %lprun -f prospect.likelihood.lnlike_phot fit_model(obs, model, sps, **run_params)
+    # 
+    # That whole thing could probably be mitigated by rewriting lnprobfn and
+    # its dependencies in JAX and JIT compiling it, although this may introduce
+    # issues in dynesty?
+    # 
+    # @partial(jax.jit, static_argnums=0)
+    def predict(self, theta, obs, **extras):
+        return (np.array(self.predict_spec(theta)),
+                np.array(self.predict_phot(theta)),
+                np.array(self.predict_mfrac(theta)))
+
+# Stitched emulator's build_model function
+def build_model_stitched(obs=None, emulfp=None, **extras):
+    fit_order = ['massmet',
+                 'logsfr_ratios',
+                 'dust2',
+                 'dust_index',
+                 'dust1_fraction',
+                 'log_fagn',
+                 'log_agn_tau',
+                 'gas_logz',
+                 'zred',
+                 'duste_qpah',
+                 'duste_umin',
+                 'log_duste_gamma']
+
+    # -------------
+    # MODEL_PARAMS
+    model_params = {}
+
+    # --- BASIC PARAMETERS ---
+    model_params['zred'] = {'N': 1, 'isfree': True,
+                            'init': obs["zred"],
+                            'prior': FastUniform(a=0.0, b=24.0)}
+
+    model_params['logmass'] = {'N': 1, 'isfree': False,
+                              'depends_on': massmet_to_logmass,
+                              'init': 10.0,
+                              'units': 'Msun',
+                              'prior': FastUniform(a=7.0, b=12.5)}
+
+    model_params['logzsol'] = {'N': 1, 'isfree': False,
+                               'init': -0.5,
+                               'depends_on': massmet_to_logzsol,
+                               'units': r'$\log (Z/Z_\odot)$',
+                               'prior': FastUniform(a=-1.98, b=0.19)}
+
+    model_params['massmet'] = {'N': 2, 'isfree': True,
+                               'init': np.array([10, -0.5]),
+                               'prior': FastMassMet(a=6.0, b=12.5)}
+
+    # --- SFH ---
+    model_params['logsfr_ratios'] = {'N': 6, 'isfree': True,
+                                     'init': 0.0,
+                                     'prior': FastTruncatedEvenStudentTFreeDeg2(hw=np.ones(6)*5.0,
+                                                                                sig=np.ones(6)*0.3)}
+
+    # --- Dust Absorption ---
+    model_params['dust1_fraction'] = {'N': 1, 'isfree': True,
+                                      'init': 1.0,
+                                      'prior': FastTruncatedNormal(a=0.0, b=2.0, mu=1.0, sig=0.3)}
+
+    model_params['dust2'] = {'N': 1, 'isfree': True,
+                             'init': 0.0,
+                             'units': '',
+                             'prior': FastTruncatedNormal(a=0.0, b=4.0, mu=0.3, sig=1.0)}
+
+    model_params['dust_index'] = {'N': 1, 'isfree': True,
+                                  'init': 0.7,
+                                  'units': '',
+                                  'prior': FastUniform(a=-1.2, b=0.4)}
+
+    # --- Nebular Emission ---
+    model_params['gas_logz'] = {'N': 1, 'isfree': True,
+                                'init': -0.5,
+                                'units': r'log Z/Z_\odot',
+                                'prior': FastUniform(a=-2.0, b=0.5)}
+
+    # --- AGN dust ---
+    model_params['log_fagn'] = {'N': 1, 'isfree': True,
+                                'init': -7.0e-5,
+                                'prior': FastUniform(a=-5.0, b=np.log10(3.0))}
+
+    model_params['log_agn_tau'] = {'N': 1, 'isfree': True,
+                                   'init': np.log10(20.0),
+                                   'prior': FastUniform(a=np.log10(5.0), b=np.log10(150.0))}
+
+    # --- Dust Emission ---
+    model_params['duste_qpah'] = {'N':1, 'isfree':True,
+                                  'init': 2.0,
+                                  'prior': FastTruncatedNormal(a=0.0, b=7.0, mu=2.0, sig=2.0)}
+
+    model_params['duste_umin'] = {'N':1, 'isfree':True,
+                                  'init': 1.0,
+                                  'prior': FastTruncatedNormal(a=0.1, b=25.0, mu=1.0, sig=10.0)}
+
+    model_params['log_duste_gamma'] = {'N':1, 'isfree':True,
+                                       'init': -2.0,
+                                       'prior': FastTruncatedNormal(a=-4.0, b=0.0, mu=-2.0, sig=1.0)}
+
+    #---- Units ----
+    model_params['peraa'] = {'N': 1, 'isfree': False, 'init': False}
+
+    model_params['mass_units'] = {'N': 1, 'isfree': False, 'init': 'mformed'}
+
+    extra = [k for k in model_params.keys() if k not in fit_order]
+    fit_order = fit_order + list(extra)
+
+    return PhotoMultiEmulator(
         model_params,
         fp = emulfp,
         obs = obs,
