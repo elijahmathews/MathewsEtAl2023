@@ -158,7 +158,7 @@ def massmet_to_logzsol(massmet=None, **extras):
     return massmet[1]
 
 # Emulator's build_model function
-def load_model_emulator(obs=None, emulfp=None, **extras):
+def build_model_emulator(obs=None, emulfp=None, **extras):
     fit_order = ['massmet',
                  'logsfr_ratios',
                  'dust2',
@@ -325,7 +325,7 @@ def to_fagn(log_fagn=None, **extras):
 def to_agn_tau(log_agn_tau=None, **extras):
     return 10.0**(log_agn_tau)
 
-def load_model_fsps(obs=None, sps=None, df=2, sigma=0.3, nbins_sfh=7, **extras):
+def build_model_fsps(obs=None, sps=None, df=2, sigma=0.3, nbins_sfh=7, **extras):
     fit_order = ['massmet',
                  'logsfr_ratios',
                  'dust2',

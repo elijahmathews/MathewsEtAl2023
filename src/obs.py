@@ -55,7 +55,7 @@ datadir = os.path.join(os.path.dirname(__file__), "..", "data")
 filter_list_fp = os.path.join(datadir, "parrot_v4_filters.txt")
 
 # Function for loading in the mock observations
-def load_obs(objid=None, emulator_filter_fp=filter_list_fp, filter_selection=cosmos_filters, datadir=datadir, **extras):
+def build_obs(objid=None, emulator_filter_fp=filter_list_fp, filter_selection=cosmos_filters, datadir=datadir, **extras):
     ### load the names of all filters in V4 emulator
     with open(emulator_filter_fp) as f:
         lines = [line.strip() for line in f.readlines()]

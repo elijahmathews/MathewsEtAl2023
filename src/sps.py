@@ -5,7 +5,7 @@ from sedpy import observate
 from astropy.cosmology import WMAP9
 
 # Emulator's load_sps function is pretty simple
-def load_sps_emulator(**extras):
+def build_sps_emulator(**extras):
     return None
 
 
@@ -132,5 +132,5 @@ class NebSFH(FastStepBasis):
 
         return ewave, elum
 
-def load_sps_fsps(**extras):
+def build_sps_fsps(**extras):
     return NebSFH(**extras)
